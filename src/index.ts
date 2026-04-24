@@ -3,12 +3,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createStatefulServer } from "@smithery/sdk/server/stateful.js"
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
 import { z } from "zod"
 import { google, gmail_v1 } from 'googleapis'
 import fs from "fs"
 import { createOAuth2Client, launchAuthServer, validateCredentials } from "./oauth2.js"
 import { MCP_CONFIG_DIR, PORT, TELEMETRY_ENABLED } from "./config.js"
 import { instrumentServer } from "@shinzolabs/instrumentation-mcp"
+import type { Request, Response, NextFunction } from "express"
+
+const log = (...args: any[]) => process.stderr.write(`[gmail-mcp] ${args.join(' ')}\n`)
+
 
 type Draft = gmail_v1.Schema$Draft
 type DraftCreateParams = gmail_v1.Params$Resource$Users$Drafts$Create
@@ -1349,14 +1354,94 @@ const main = async () => {
     process.exit(0)
   }
 
-  // Stdio Server
-  const stdioServer = createServer({})
-  const transport = new StdioServerTransport()
-  await stdioServer.connect(transport)
+  const stdioOnly = process.argv.includes('--stdio-only')
 
-  // Streamable HTTP Server
-  const { app } = createStatefulServer(createServer)
-  app.listen(PORT)
+  if (stdioOnly) {
+    log('Starting in stdio-only mode')
+    const stdioServer = createServer({})
+    const transport = new StdioServerTransport()
+    await stdioServer.connect(transport)
+    log('Stdio transport connected')
+    return
+  }
+
+  log(`Starting in HTTP mode on port ${PORT}`)
+
+  // Create the Express app first so we can register middleware before
+  // createStatefulServer adds its own /mcp route handlers.
+  const express = (await import("express")).default
+  const app = express()
+
+  // Auto-initialize middleware: if a POST /mcp arrives without a session ID and
+  // it is NOT already an initialize request, synthesize an initialize round-trip
+  // first so clients that skip the MCP handshake still work (e.g. supergateway).
+  app.use("/mcp", express.json(), async (req: Request, res: Response, next: NextFunction) => {
+    if (req.method !== "POST") return next()
+    const sessionId = req.headers["mcp-session-id"]
+    if (sessionId) return next()
+    if (isInitializeRequest(req.body)) return next()
+
+    log(`Auto-initializing session for method=${req.body?.method} id=${req.body?.id}`)
+    try {
+      const baseUrl = `http://127.0.0.1:${PORT}`
+
+      const initResponse = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "auto-init",
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "auto-init", version: "1.0.0" }
+          }
+        })
+      })
+
+      const newSessionId = initResponse.headers.get("mcp-session-id")
+      if (!newSessionId) {
+        log('Auto-initialize failed: no session ID returned')
+        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Auto-initialize failed: no session ID returned" }, id: null })
+        return
+      }
+
+      log(`Auto-initialize succeeded, session=${newSessionId}`)
+
+      await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "mcp-session-id": newSessionId },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })
+      })
+
+      req.headers["mcp-session-id"] = newSessionId
+    } catch (err: any) {
+      log(`Auto-initialize error: ${err.message}`)
+      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: `Auto-initialize error: ${err.message}` }, id: null })
+      return
+    }
+
+    next()
+  })
+
+  // Log all /mcp requests
+  app.use("/mcp", (req: Request, _res: Response, next: NextFunction) => {
+    log(`${req.method} /mcp session=${req.headers["mcp-session-id"] ?? "none"} body=${JSON.stringify(req.body)}`)
+    next()
+  })
+
+  createStatefulServer(createServer, { app })
+
+  await new Promise<void>((resolve, reject) => {
+    app.listen(PORT, () => resolve())
+      .on('error', reject)
+  })
+
+  log(`HTTP server listening on port ${PORT}, endpoint: http://0.0.0.0:${PORT}/mcp`)
 }
 
-main()
+main().catch(err => {
+  process.stderr.write(`[gmail-mcp] Fatal error: ${err.message}\n${err.stack}\n`)
+  process.exit(1)
+})
