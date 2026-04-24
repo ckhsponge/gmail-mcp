@@ -12,19 +12,29 @@ const AUTH_SCOPES = [
   'https://www.googleapis.com/auth/gmail.settings.sharing'
 ]
 
+const log = (...args: any[]) => process.stderr.write(`[gmail-mcp/oauth2] ${args.join(' ')}\n`)
+
 const getEnvBasedCredentials = (queryConfig?: Record<string, any>) => {
   const clientId = queryConfig?.CLIENT_ID || CLIENT_ID
   const clientSecret = queryConfig?.CLIENT_SECRET || CLIENT_SECRET
   const refreshToken = queryConfig?.REFRESH_TOKEN || REFRESH_TOKEN
 
-  if (!clientId || !clientSecret || !refreshToken) return null
+  if (!clientId || !clientSecret || !refreshToken) {
+    log(`Env-based credentials incomplete: clientId=${!!clientId} clientSecret=${!!clientSecret} refreshToken=${!!refreshToken}`)
+    return null
+  }
 
-  return { clientId, clientSecret, refreshToken }
+  log('Using env-based credentials')
+  return { clientId, clientSecret, refreshToken, fullCredentials: null as Record<string, any> | null }
 }
 
 const getFileBasedCredentials = () => {
+  log(`Looking for OAuth keys at: ${GMAIL_OAUTH_PATH}`)
   const oauthFilePresent = fs.existsSync(GMAIL_OAUTH_PATH)
-  if (!oauthFilePresent) return null
+  if (!oauthFilePresent) {
+    log('OAuth keys file not found')
+    return null
+  }
 
   const keysContent = fs.readFileSync(GMAIL_OAUTH_PATH, 'utf8')
   const parsedKeys = JSON.parse(keysContent)
@@ -32,13 +42,19 @@ const getFileBasedCredentials = () => {
   const clientId = parsedKeys?.installed?.client_id || parsedKeys?.web?.client_id
   const clientSecret = parsedKeys?.installed?.client_secret || parsedKeys?.web?.client_secret
 
+  log(`Looking for credentials at: ${GMAIL_CREDENTIALS_PATH}`)
   let refreshToken = null
+  let fullCredentials: Record<string, any> | null = null
   if (fs.existsSync(GMAIL_CREDENTIALS_PATH)) {
-    const gmailCredentialsFile = JSON.parse(fs.readFileSync(GMAIL_CREDENTIALS_PATH, 'utf8'))
-    refreshToken = gmailCredentialsFile?.refresh_token
+    fullCredentials = JSON.parse(fs.readFileSync(GMAIL_CREDENTIALS_PATH, 'utf8'))
+    refreshToken = fullCredentials?.refresh_token
+    log(`Credentials file found, keys: ${Object.keys(fullCredentials ?? {}).join(', ')}`)
+  } else {
+    log('Credentials file not found')
   }
 
-  return { clientId, clientSecret, refreshToken }
+  log(`File-based credentials: clientId=${!!clientId} clientSecret=${!!clientSecret} refreshToken=${!!refreshToken}`)
+  return { clientId, clientSecret, refreshToken, fullCredentials }
 }
 
 export const createOAuth2Client = (queryConfig?: Record<string, any>) => {
@@ -53,10 +69,17 @@ export const createOAuth2Client = (queryConfig?: Record<string, any>) => {
       redirectUri: `http://localhost:${AUTH_SERVER_PORT}/oauth2callback`
     })
 
-    if (credentials?.refreshToken) oauth2Client.setCredentials({ refresh_token: credentials.refreshToken })
+    // Set full credentials (including access_token and expiry_date) if available
+    // so validateCredentials can skip unnecessary token refreshes
+    if (credentials?.fullCredentials) {
+      oauth2Client.setCredentials(credentials.fullCredentials)
+    } else if (credentials?.refreshToken) {
+      oauth2Client.setCredentials({ refresh_token: credentials.refreshToken })
+    }
 
     return oauth2Client
   } catch (error: any) {
+    log(`createOAuth2Client error: ${error.message}`)
     return null
   }
 }
@@ -104,21 +127,31 @@ export const launchAuthServer = async (oauth2Client: OAuth2Client) => new Promis
 export const validateCredentials = async (oauth2Client: OAuth2Client) => {
   try {
     const { credentials } = oauth2Client
-    if (!credentials) return false
+    if (!credentials) {
+      log('validateCredentials: no credentials object')
+      return false
+    }
 
     const expiryDate = credentials.expiry_date
     const needsRefresh = !expiryDate || expiryDate <= Date.now()
+    log(`validateCredentials: hasRefreshToken=${!!credentials.refresh_token} expiryDate=${expiryDate} needsRefresh=${needsRefresh}`)
 
     if (!needsRefresh) return true
 
-    if (!credentials.refresh_token) return false
+    if (!credentials.refresh_token) {
+      log('validateCredentials: needs refresh but no refresh_token present')
+      return false
+    }
 
+    log('validateCredentials: refreshing access token...')
     const { credentials: tokens } = await oauth2Client.refreshAccessToken()
     oauth2Client.setCredentials(tokens)
 
     fs.writeFileSync(GMAIL_CREDENTIALS_PATH, JSON.stringify(tokens, null, 2))
+    log('validateCredentials: token refreshed successfully')
     return true
-  } catch (error: any) { 
+  } catch (error: any) {
+    log(`validateCredentials: error - ${error.message}`)
     return false
   }
 }
