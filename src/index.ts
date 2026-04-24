@@ -1402,7 +1402,7 @@ const main = async () => {
 
       const newSessionId = initResponse.headers.get("mcp-session-id")
       if (!newSessionId) {
-        log('Auto-initialize failed: no session ID returned')
+        log(`Auto-initialize failed: no session ID returned. Status=${initResponse.status} headers=${JSON.stringify(Object.fromEntries(initResponse.headers.entries()))}`)
         res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Auto-initialize failed: no session ID returned" }, id: null })
         return
       }
@@ -1426,8 +1426,8 @@ const main = async () => {
   })
 
   // Log all /mcp requests
-  app.use("/mcp", (req: Request, _res: Response, next: NextFunction) => {
-    log(`${req.method} /mcp session=${req.headers["mcp-session-id"] ?? "none"} body=${JSON.stringify(req.body)}`)
+  app.use("/mcp", (req: Request, res: Response, next: NextFunction) => {
+    log(`${req.method} /mcp session=${req.headers["mcp-session-id"] ?? "none"} headers=${JSON.stringify(req.headers)} body=${JSON.stringify(req.body)}`)
     next()
   })
 
