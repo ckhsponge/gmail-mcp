@@ -32,6 +32,7 @@ type NewMessage = {
   bcc?: string[] | undefined
   subject?: string | undefined
   body?: string | undefined
+  bodyHtml?: string | undefined
   includeBodyHtml?: boolean
 }
 
@@ -220,18 +221,50 @@ const constructRawMessage = async (gmail: gmail_v1.Gmail, params: NewMessage) =>
   } else {
     message.push('Subject: (No Subject)')
   }
-  message.push('Content-Type: text/plain; charset="UTF-8"')
-  message.push('Content-Transfer-Encoding: quoted-printable')
   message.push('MIME-Version: 1.0')
-  message.push('')
 
-  if (params.body) message.push(wrapTextBody(params.body))
+  if (params.bodyHtml) {
+    // multipart/alternative: plain text + HTML
+    const boundary = `boundary_${Date.now().toString(36)}`
+    message.push(`Content-Type: multipart/alternative; boundary="${boundary}"`)
+    message.push('')
 
-  if (thread) {
-    const quotedContent = getQuotedContent(thread)
-    if (quotedContent) {
-      message.push('')
-      message.push(wrapTextBody(quotedContent))
+    // Plain text part
+    message.push(`--${boundary}`)
+    message.push('Content-Type: text/plain; charset="UTF-8"')
+    message.push('Content-Transfer-Encoding: quoted-printable')
+    message.push('')
+    if (params.body) message.push(wrapTextBody(params.body))
+
+    if (thread) {
+      const quotedContent = getQuotedContent(thread)
+      if (quotedContent) {
+        message.push('')
+        message.push(wrapTextBody(quotedContent))
+      }
+    }
+
+    // HTML part
+    message.push(`--${boundary}`)
+    message.push('Content-Type: text/html; charset="UTF-8"')
+    message.push('Content-Transfer-Encoding: quoted-printable')
+    message.push('')
+    message.push(wrapTextBody(params.bodyHtml))
+    message.push(`--${boundary}--`)
+  } else {
+    // Plain text only
+    message.push('Content-Type: text/plain; charset="UTF-8"')
+    message.push('Content-Transfer-Encoding: quoted-printable')
+    message.push('')
+
+    if (params.body) message.push(wrapTextBody(params.body))
+
+    if (thread) {
+      const quotedContent = getQuotedContent(thread)
+      if (quotedContent) {
+        message.push('')
+        message.push(wrapTextBody(quotedContent))
+      }
     }
   }
 
@@ -266,13 +299,14 @@ function createServer({ config }: { config?: Record<string, any> }) {
   server.tool("create_draft",
     "Create a draft email in Gmail. Note the mechanics of the raw parameter.",
     {
-      raw: z.string().optional().describe("The entire email message in base64url encoded RFC 2822 format, ignores params.to, cc, bcc, subject, body, includeBodyHtml if provided"),
+      raw: z.string().optional().describe("The entire email message in base64url encoded RFC 2822 format, ignores params.to, cc, bcc, subject, body, bodyHtml, includeBodyHtml if provided"),
       threadId: z.string().optional().describe("The thread ID to associate this draft with"),
       to: z.array(z.string()).optional().describe("List of recipient email addresses"),
       cc: z.array(z.string()).optional().describe("List of CC recipient email addresses"),
       bcc: z.array(z.string()).optional().describe("List of BCC recipient email addresses"),
       subject: z.string().optional().describe("The subject of the email"),
-      body: z.string().optional().describe("The body of the email"),
+      body: z.string().optional().describe("The plain text body of the email"),
+      bodyHtml: z.string().optional().describe("The HTML body of the email. When provided, sends a multipart/alternative message with both plain text and HTML parts"),
       includeBodyHtml: z.boolean().optional().describe("Whether to include the parsed HTML in the return for each body, excluded by default because they can be excessively large")
     },
     async (params) => {
@@ -644,13 +678,14 @@ function createServer({ config }: { config?: Record<string, any> }) {
   server.tool("send_message",
     "Send an email message to specified recipients. Note the mechanics of the raw parameter.",
     {
-      raw: z.string().optional().describe("The entire email message in base64url encoded RFC 2822 format, ignores params.to, cc, bcc, subject, body, includeBodyHtml if provided"),
+      raw: z.string().optional().describe("The entire email message in base64url encoded RFC 2822 format, ignores params.to, cc, bcc, subject, body, bodyHtml, includeBodyHtml if provided"),
       threadId: z.string().optional().describe("The thread ID to associate this message with"),
       to: z.array(z.string()).optional().describe("List of recipient email addresses"),
       cc: z.array(z.string()).optional().describe("List of CC recipient email addresses"),
       bcc: z.array(z.string()).optional().describe("List of BCC recipient email addresses"),
       subject: z.string().optional().describe("The subject of the email"),
-      body: z.string().optional().describe("The body of the email"),
+      body: z.string().optional().describe("The plain text body of the email"),
+      bodyHtml: z.string().optional().describe("The HTML body of the email. When provided, sends a multipart/alternative message with both plain text and HTML parts"),
       includeBodyHtml: z.boolean().optional().describe("Whether to include the parsed HTML in the return for each body, excluded by default because they can be excessively large")
     },
     async (params) => {
